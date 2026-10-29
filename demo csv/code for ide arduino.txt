@@ -1,0 +1,149 @@
+#include <Wire.h>
+#include <Adafruit_Fingerprint.h>
+#include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+#include <TimeLib.h>  // Include the TimeLib library for date-time manipulation
+#include <map>  // Include the map library for tracking entries
+
+// Wi-Fi credentials
+const char* ssid = "abcde";
+const char* password = "123456789";
+
+// NTP settings
+const char* ntpServer = "pool.ntp.org";
+const long  utcOffsetInSeconds = 21600;  // UTC+6 for Dhaka
+
+WiFiUDP udp;
+NTPClient timeClient(udp, ntpServer, utcOffsetInSeconds, 60000); // Update every 60 seconds
+
+#if (defined(_AVR) || defined(ESP8266)) && !defined(AVR_ATmega2560_)
+SoftwareSerial mySerial(D5, D6); // For Software Serial (UNO)
+#else
+#define mySerial Serial1 // For hardware serial (Leonardo, etc.)
+#endif
+
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
+// Define a map/dictionary for Finger ID to Name mapping
+String fingerName[] = {"", "Sazzad", "", "Ayon"}; // Example names, index 1 corresponds to Finger ID 1, etc.
+
+// Map to track the entries (key: Finger ID, value: entry time)
+std::map<int, unsigned long> entryTimes;
+
+// Function declarations
+void sendFingerprintData(String name, String action, unsigned long entryTime);
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial);
+  delay(100);
+
+  // Connect to Wi-Fi
+  Serial.println("Connecting to Wi-Fi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting...");
+  }
+  Serial.println("Connected to Wi-Fi!");
+
+  // Start the NTP client
+  timeClient.begin();
+  timeClient.update();
+
+  Serial.println("\n\nAdafruit Fingerprint sensor");
+
+  finger.begin(57600);
+  delay(5);
+  if (finger.verifyPassword()) {
+    Serial.println("Found fingerprint sensor!");
+  } else {
+    Serial.println("Did not find fingerprint sensor :(");
+    while (1) { delay(1); }
+  }
+
+  finger.getParameters();
+  finger.getTemplateCount();
+  Serial.print("Sensor has ");
+  Serial.print(finger.templateCount);
+  Serial.println(" templates.");
+}
+
+void loop() {
+  getFingerprintID();  // Capture fingerprint and send data
+  delay(1000); // Wait before attempting to capture again
+}
+
+uint8_t getFingerprintID() {
+  uint8_t p = finger.getImage();
+  if (p != FINGERPRINT_OK) return -1;
+
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) return -1;
+
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK) {
+    Serial.print("Finger ID: ");
+    Serial.println(finger.fingerID); // Send Finger ID to Serial
+    String name = fingerName[finger.fingerID];  // Get the name corresponding to the finger ID
+
+    // Check if the fingerprint has been entered
+    if (entryTimes.find(finger.fingerID) == entryTimes.end()) {
+      // New fingerprint, mark as entry
+      entryTimes[finger.fingerID] = timeClient.getEpochTime(); // Store entry time
+      sendFingerprintData(name, "entry", timeClient.getEpochTime());  // Send Entry Data
+    } else {
+      // Matching entry found, mark as exit
+      unsigned long entryTime = entryTimes[finger.fingerID];
+      sendFingerprintData(name, "exit", entryTime);  // Send Exit Data
+
+      // Remove the entry from the map after exit
+      entryTimes.erase(finger.fingerID);
+    }
+
+    delay(10000); // Wait for 5 seconds (simulate exit)
+    return finger.fingerID;  // Return Finger ID
+  } else {
+    Serial.println("No match found");
+    return -1;
+  }
+}
+
+// Function to send fingerprint data to Processing
+void sendFingerprintData(String name, String action, unsigned long entryTime) {
+  // Get the current time from NTP
+  timeClient.update();  // Update the time
+  unsigned long epochTime = timeClient.getEpochTime(); // Get the epoch time
+
+  // Convert epoch time to date and time using TimeLib
+  setTime(epochTime);  // Set the current time
+
+  // Convert time to 12-hour format (AM/PM)
+  int hour12 = hour() % 12;
+  String ampm = (hour() >= 12) ? "PM" : "AM";
+  if (hour12 == 0) hour12 = 12;  // Handle the 12 o'clock case
+
+  String currentTime = String(hour12) + ":" + String(minute()) + ":" + String(second()) + " " + ampm; // 12-hour format with AM/PM
+  String currentDate = String(year()) + "-" + String(month()) + "-" + String(day()); // Date as YYYY-MM-DD
+
+  String dataToSend = String(finger.fingerID) + "," + name + "," + currentDate + " " + currentTime + "," + action;
+
+  // If exit action, include entry time as part of the data
+  if (action == "exit" && entryTime > 0) {
+    setTime(entryTime);  // Set the entry time
+    int entryHour12 = hour() % 12;
+    String entryAmPm = (hour() >= 12) ? "PM" : "AM";
+    if (entryHour12 == 0) entryHour12 = 12;  // Handle the 12 o'clock case
+
+    String entryTimeStr = String(entryHour12) + ":" + String(minute()) + ":" + String(second()) + " " + entryAmPm;
+    dataToSend += ", Entry Time: " + entryTimeStr;
+  }
+
+  // Send the data to Processing via serial
+  Serial.println(dataToSend);
+
+  // Optional: For debugging, print the data to the serial monitor
+  // Serial.print("Sent Data: ");
+  // Serial.println(dataToSend);
+}
